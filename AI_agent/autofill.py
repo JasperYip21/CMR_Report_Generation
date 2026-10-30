@@ -9,8 +9,18 @@ from docx import Document
 
 try:
     from AI_agent.clinical_pdf_parser import parse_clinical_report_pdf
+    from AI_agent.reference_ranges import (
+        atrial_max_volume_interval,
+        atrial_reference_interval,
+        reference_profile,
+    )
 except ModuleNotFoundError:
     from clinical_pdf_parser import parse_clinical_report_pdf
+    from reference_ranges import (
+        atrial_max_volume_interval,
+        atrial_reference_interval,
+        reference_profile,
+    )
 
 
 _HERE = Path(__file__).resolve().parent
@@ -42,53 +52,76 @@ def _combine_classifications(*values: str | None) -> str | None:
     return "abnormal" if "abnormal" in values else "normal"
 
 
+def _classify_metric_set(
+    measurements: dict[str, Any], ranges: dict[str, tuple[float, float]]
+) -> str | None:
+    if not ranges or any(_number(measurements.get(key)) is None for key in ranges):
+        return None
+    return _combine_classifications(
+        *(_classify(measurements[key], value) for key, value in ranges.items())
+    )
+
+
+def _classify_mass(data: dict[str, Any], profile: dict[str, Any]) -> str | None:
+    mass_ranges = {}
+    if profile["lv_mass"] is not None:
+        mass_ranges["myomass_diast"] = profile["lv_mass"]
+    if profile["lv_mass_bsa"] is not None:
+        mass_ranges["myomass_bsa"] = profile["lv_mass_bsa"]
+    return _classify_metric_set(data.get("lv", {}), mass_ranges)
+
+
+def _classify_atrium(
+    data: dict[str, Any],
+    chamber: str,
+    sex: str | None,
+    age: int | None,
+) -> str | None:
+    measurements = data.get(chamber, {})
+    statuses = []
+    volume_fields = (
+        (("max_volume_ml", False), ("max_volume_bsa", True))
+        if chamber == "la"
+        else ()
+    )
+    for metric, indexed in volume_fields:
+        interval = atrial_max_volume_interval(sex, age, indexed=indexed)
+        if interval is not None and _number(measurements.get(metric)) is not None:
+            statuses.append(_classify(measurements[metric], interval))
+
+    view = measurements.get("area_view")
+    if view:
+        for metric, indexed in (("area_cm2", False), ("area_bsa", True)):
+            interval = atrial_reference_interval(
+                chamber=chamber,
+                view=view,
+                sex=sex,
+                age=age,
+                indexed=indexed,
+            )
+            if interval is not None and _number(measurements.get(metric)) is not None:
+                statuses.append(_classify(measurements[metric], interval))
+    return _combine_classifications(*statuses) if statuses else None
+
+
 def classify_report_measurements(data: dict[str, Any]) -> dict[str, list[str | None]]:
-    """Classify metrics supported by the female >=60 y reference table."""
-    study = data.get("study_info", {})
-    age = study.get("age")
-    sex = (study.get("sex") or "").strip().lower()
-    if age is None or age < 60 or sex not in {"f", "female", "woman"}:
+    """Classify values using the matched supplied sex/age/population profile."""
+    profile = reference_profile(data)
+    if profile is None:
         return {}
-
-    lv = data.get("lv", {})
-    rv = data.get("rv", {})
-    lv_ranges = {
-        "edv": (78, 162),
-        "esv": (19, 57),
-        "sv": (54, 110),
-        "ejection_fraction_pct": (60, 78),
-    }
-    rv_ranges = {
-        "edv": (70, 158),
-        "esv": (9, 61),
-        "sv": (54, 106),
-        "ejection_fraction_pct": (58, 82),
-    }
-
-    def function_status(
-        measurements: dict[str, Any], ranges: dict[str, tuple[float, float]]
-    ) -> str | None:
-        statuses = [
-            _classify(measurements.get(key), reference_range)
-            for key, reference_range in ranges.items()
-        ]
-        return _combine_classifications(*statuses)
-
-    lv_function_statuses = [function_status(lv, lv_ranges)]
-    if "edv_bsa" in lv:
-        lv_function_statuses.append(_classify(lv["edv_bsa"], (52, 86)))
-    lv_function = _combine_classifications(*lv_function_statuses)
-
-    rv_function_statuses = [function_status(rv, rv_ranges)]
-    if "edv_bsa" in rv:
-        rv_function_statuses.append(_classify(rv["edv_bsa"], (48, 84)))
-    rv_function = _combine_classifications(*rv_function_statuses)
-
-    lv_mass_statuses = [_classify(lv.get("myomass_diast"), (74, 146))]
-    if "myomass_bsa" in lv:
-        lv_mass_statuses.append(_classify(lv["myomass_bsa"], (48, 78)))
-    lv_mass = _combine_classifications(*lv_mass_statuses)
+    lv_function = _classify_metric_set(data.get("lv", {}), profile["lv"])
+    rv_function = _classify_metric_set(data.get("rv", {}), profile["rv"])
+    lv_mass = _classify_mass(data, profile)
+    study = data.get("study_info", {})
+    la_size = _classify_atrium(
+        data, "la", study.get("sex"), study.get("age")
+    )
+    ra_size = _classify_atrium(
+        data, "ra", study.get("sex"), study.get("age")
+    )
     return {
+        "Left Atrium": [la_size],
+        "Right Atrium": [ra_size],
         "Left Ventricle": [
             lv_function,
             lv_mass,
@@ -116,19 +149,19 @@ def _replace_classified_placeholders(
         run.text = re.sub(r"\[\]", replace_match, run.text)
 
 
-def generate_non_stress_report(
-    pdf_file_path: str | Path = DEFAULT_INPUT,
-    template_path: str | Path = DEFAULT_TEMPLATE,
-    output_filename: str | Path = DEFAULT_OUTPUT,
+def _write_report(
+    data: dict[str, Any], template_path: str | Path, output_filename: str | Path
 ) -> Path:
-    """Classify supported measurements and save the minimally changed template."""
-    data = parse_clinical_report_pdf(pdf_file_path)
     classifications = classify_report_measurements(data)
     document = Document(template_path)
 
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
-        if text.startswith("Left Ventricle:"):
+        if text.startswith("Left Atrium:"):
+            values = classifications.get("Left Atrium")
+        elif text.startswith("Right Atrium:"):
+            values = classifications.get("Right Atrium")
+        elif text.startswith("Left Ventricle:"):
             values = classifications.get("Left Ventricle")
         elif text.startswith("Right Ventricle:"):
             values = classifications.get("Right Ventricle")
@@ -143,6 +176,41 @@ def generate_non_stress_report(
     output.parent.mkdir(parents=True, exist_ok=True)
     document.save(output)
     return output
+
+
+def generate_non_stress_report(
+    pdf_file_path: str | Path = DEFAULT_INPUT,
+    template_path: str | Path = DEFAULT_TEMPLATE,
+    output_filename: str | Path = DEFAULT_OUTPUT,
+) -> Path:
+    """Classify supported measurements and save the minimally changed template."""
+    data = parse_clinical_report_pdf(pdf_file_path)
+    return _write_report(data, template_path, output_filename)
+
+
+def _unclassified_fields(
+    classifications: dict[str, list[str | None]]
+) -> list[str]:
+    if not classifications:
+        return [
+            "all classification placeholders (no matching sex/age reference profile)"
+        ]
+    fields = []
+    for section, label, index in (
+        ("Left Atrium", "LA size", 0),
+        ("Right Atrium", "RA size", 0),
+        ("Left Ventricle", "LV volumes and systolic function", 0),
+        ("Left Ventricle", "LV hypertrophy", 1),
+        ("Left Ventricle", "LV wall thickness", 2),
+        ("Left Ventricle", "LV mass", 3),
+        ("Right Ventricle", "RV volumes and systolic function", 0),
+        ("Conclusion", "combined LV/RV function", 0),
+        ("Conclusion", "scar/infarct", 1),
+    ):
+        values = classifications.get(section, [])
+        if index >= len(values) or values[index] is None:
+            fields.append(label)
+    return fields
 
 
 def main() -> None:
@@ -160,8 +228,16 @@ def main() -> None:
         "--output", type=Path, default=DEFAULT_OUTPUT, help="Generated DOCX path"
     )
     args = parser.parse_args()
-    result = generate_non_stress_report(args.input, args.template, args.output)
+    data = parse_clinical_report_pdf(args.input)
+    result = _write_report(data, args.template, args.output)
     print(f"Generated report: {result}")
+    unclassified = _unclassified_fields(classify_report_measurements(data))
+    if unclassified:
+        print(
+            "Template placeholders left unchanged: "
+            + ", ".join(unclassified)
+            + "."
+        )
 
 
 if __name__ == "__main__":

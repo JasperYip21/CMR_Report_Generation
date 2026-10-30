@@ -1,58 +1,75 @@
 # CMR non-stress report classification
 
-The program extracts measurements from the supplied cvi42 clinical report PDF
-and classifies supported values in the CMR non-stress Word template. It changes
-only `[]` placeholders for which both a measurement and an applicable reference
-range are available. Every other line, placeholder, and the measurements table
-remain exactly as in the template.
+The program reads measurements and available demographics from a selectable-text
+clinical report PDF, selects a supplied CMR reference profile, and fills only
+the template's `[]` classification placeholders. It writes a `.docx` based on
+the original Word template. Lines and placeholders without a supported
+measurement/reference match are preserved exactly; the generator does not
+write inferred clinical history or unsupported normal/abnormal findings.
+
+## Run
 
 Install dependencies and run from the repository root:
 
 ```powershell
 python -m pip install -r AI_agent\requirements.txt
-python AI_agent\autofill.py --input AI_agent\AI_test_2026-09-22_Clinical_Report_2026-09-23.pdf --output AI_agent\CMR_Non_Stress_Report_Final.docx
+python AI_agent\autofill.py --input path\to\clinical-report.pdf --output path\to\report.docx
 ```
 
-By default, the supplied PDF and template are used. Use `--template` to select
-another compatible Word template. A PDF must contain selectable text; scanned
-PDFs require OCR before use.
+By default, the supplied example PDF and CMR non-stress template are used. Use
+`--template` to select another compatible Word template. The input PDF must
+contain selectable text; scanned PDFs need OCR before they can be parsed.
+Repeated identical values are accepted, while conflicting repeated values are
+treated as ambiguous and not used. The CLI reports which classification
+placeholders remain unchanged; it stops with an error when the PDF contains no
+recognized CMR measurements.
 
-The supplied sample is a female aged 82, so the age- and sex-matched
-`Reference Values CMR - FEMALE ABOVE 59yrs.docx` ranges are applied:
+## Reference matching and classification
 
-| Measurement | Reference range |
-|---|---:|
-| LV EDV | 78-162 mL |
-| LV EDV/BSA | 52-86 mL/m2 |
-| LV ESV | 19-57 mL |
-| LV stroke volume | 54-110 mL |
-| LV ejection fraction | 60-78% |
-| LV mass | 74-146 g |
-| LV mass/BSA | 48-78 g/m2 |
-| RV EDV | 70-158 mL |
-| RV EDV/BSA | 48-84 mL/m2 |
-| RV ESV | 9-61 mL |
-| RV stroke volume | 54-106 mL |
-| RV ejection fraction | 58-82% |
+The parser uses available demographics; it never supplies a default sex, age,
+height, weight, or BSA. Sex and age must be recognized to select a ventricle
+profile. The supplied ranges currently cover:
 
-For combined ventricle function placeholders, all listed measurements must be
-present; when an indexed EDV is reported, its indexed range is also checked.
-Any out-of-range value makes the classification abnormal. In the sample, LV
-function is abnormal (LV ESV 57.512 mL exceeds 57 mL and LV EDV/BSA 98.228
-mL/m2 exceeds 86 mL/m2); RV function is abnormal (RV EDV/BSA 96.380 mL/m2
-exceeds 84 mL/m2). LV mass is normal by both reported measures. LV mass is
-used for the LV mass/hypertrophy placeholders. Wall thickness is not classified
-because the supplied age/sex reference table has no applicable threshold.
+| Profile | Population |
+|---|---|
+| Female / male 8–17 | Pediatric reference documents |
+| Female / male 18–59 | Adult reference documents for age below 60 |
+| Female / male 60+ | Adult reference documents for age 60 and above |
+| Female / male Chinese | Chinese reference documents, selected only when the PDF explicitly identifies Chinese ethnicity and age is at least 18 |
 
-The supplied LA reference image covers ages 20-80 and distinguishes measurement
-methods/views. The PDF reports a single LA contour area without a view label,
-and this sample patient is 82, so the LA placeholder is left unchanged. RA area
-also has no compatible view-specific classification. Aortic/MPA line lengths
-are not treated as diameters; clinical history, scanner, anatomy, valves,
-pericardium, oedema, LGE, and extracardiac findings remain unchanged because no
-applicable classification is supported by the PDF and references.
+No supplied ventricle profile covers children under 8. Unknown/ambiguous sex,
+missing age, or an unsupported age leaves the associated placeholders
+unchanged. The Chinese source documents do not provide age-stratified tables;
+the implementation uses them only for explicitly identified adults and leaves
+atrial classifications subject to their separate age/view requirements.
 
-Run the focused tests with:
+For ventricular function, all measurements listed in the selected profile must
+be present before the function placeholder is classified. Each reported
+measurement is checked against its corresponding range; a value outside any
+applicable range makes the classification abnormal. LV mass is classified
+separately when all mass measures available in the selected profile are
+present. Missing or unsupported thresholds, including wall thickness, remain
+unclassified.
+
+Atrial classification requires an applicable adult age, known sex, and an
+explicitly identified measurement type/view. LA area references differ by
+2-, 3-, or 4-chamber view; atrial volume references are used only for the LA
+and within their documented ages. An unlabeled contour area is not assumed to
+be a specific chamber view. The supplied references do not provide a supported
+RA classification, so right atrial placeholders remain unchanged. Aortic and
+pulmonary artery line lengths are not treated as diameters. Other anatomical,
+tissue, valve, pericardial, and clinical-history lines are left unchanged
+unless a supported classification is added to the reference data.
+
+The ranges are transcribed from the reference documents in
+`AI_agent/attachments` and the supplied LA reference image in
+`AI_agent/reference_numbers.png`. This tool is intended to assist
+report preparation, not replace clinical review; confirm that the selected
+reference population and measurement method are appropriate before use.
+
+## Tests
+
+Run the focused synthetic and sample-data tests from the repository root:
 
 ```powershell
 python -m unittest AI_agent.test_report_generation
