@@ -23,6 +23,8 @@ Repeated identical values are accepted, while conflicting repeated values are
 treated as ambiguous and not used. The CLI reports which classification
 placeholders remain unchanged; it stops with an error when the PDF contains no
 recognized CMR measurements.
+`CMR_Non_Stress_Report_Generalized.docx` is the generated example based on the
+bundled PDF and template.
 
 ## Reference matching and classification
 
